@@ -41,6 +41,7 @@ def load_qa_pairs(path: Path | None = None) -> list[QAPair]:
             ) from exc
 
         pairs: list[QAPair] = []
+        seen_ids: set[str] = set()
         for row_number, row in enumerate(rows, start=2):
             if row is None or all(cell is None or str(cell).strip() == "" for cell in row):
                 continue
@@ -49,7 +50,15 @@ def load_qa_pairs(path: Path | None = None) -> list[QAPair]:
             if not question or not answer:
                 raise ValueError(f"Row {row_number} is missing a question or answer.")
             raw_id = row[id_index]
-            pair_id = str(int(raw_id)) if isinstance(raw_id, float) and raw_id.is_integer() else str(raw_id).strip()
+            pair_id = "" if raw_id is None else (
+                str(int(raw_id)) if isinstance(raw_id, float) and raw_id.is_integer()
+                else str(raw_id).strip()
+            )
+            if not pair_id:
+                raise ValueError(f"Row {row_number} is missing a Pair ID.")
+            if pair_id in seen_ids:
+                raise ValueError(f"Row {row_number} has a duplicate Pair ID.")
+            seen_ids.add(pair_id)
             pairs.append(QAPair(pair_id=pair_id, question=question, answer=answer))
         if not pairs:
             raise ValueError("The Q&A workbook has no question and answer rows.")

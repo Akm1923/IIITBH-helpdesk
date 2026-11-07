@@ -34,8 +34,7 @@ def sync_dataset(client, pairs) -> None:
             description="Golden IIIT Bhagalpur questions and reference answers for RAG evaluation.",
         )
     except Exception as exc:
-        message = str(exc).lower()
-        if "already exists" not in message and "409" not in message:
+        if getattr(exc, "status_code", None) != 409:
             raise
     for pair in pairs:
         client.create_dataset_item(

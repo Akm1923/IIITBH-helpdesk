@@ -35,11 +35,9 @@ def _trace_sources(sources: list[EvidenceSource]) -> list[dict]:
         {
             "evidence_id": source.evidence_id,
             "source_type": source.source_type,
-            "source_file": source.source_file,
             "page_number": source.page_number,
             "score": source.score,
             "used_in_answer": source.used_in_answer,
-            "excerpt": source.excerpt[:800],
         }
         for source in sources
     ]
@@ -92,7 +90,6 @@ class QueryService:
             as_type="span",
             name="rag-query",
             input={
-                "question": question,
                 "top_k": top_k,
                 "score_threshold": score_threshold,
             },
@@ -106,7 +103,6 @@ class QueryService:
                 output={
                     "query_id": result.query_id,
                     "status": result.status,
-                    "answer": result.answer,
                     "insufficient_evidence": result.insufficient_evidence,
                     "sources": _trace_sources(result.sources),
                 }
@@ -131,7 +127,7 @@ class QueryService:
         embedding_kwargs: dict = {
             "as_type": "embedding",
             "name": "embed-query",
-            "input": {"text": retrieval_query},
+            "input": {"text_length": len(retrieval_query)},
         }
         embedding_model = getattr(self.embedding_client, "model", None)
         if isinstance(embedding_model, str) and embedding_model.strip():
@@ -147,7 +143,6 @@ class QueryService:
             as_type="retriever",
             name="institutional-retrieval",
             input={
-                "query": retrieval_query,
                 "top_k": top_k,
                 "score_threshold": score_threshold,
             },
@@ -160,11 +155,9 @@ class QueryService:
                     "count": len(retrieved),
                     "hits": [
                         {
-                            "source_file": item.source_file,
                             "document_id": item.document_id,
                             "page_number": item.page_number,
                             "score": item.score,
-                            "excerpt": item.text[:800],
                         }
                         for item in retrieved
                     ],
@@ -200,20 +193,12 @@ class QueryService:
                 with observation(
                     as_type="tool",
                     name="web-search",
-                    input={"query": live_query},
+                    input={"query_length": len(live_query)},
                 ) as web_obs:
                     web_results = self.web_search.search(live_query)
                     web_obs.update(
                         output={
                             "count": len(web_results),
-                            "results": [
-                                {
-                                    "title": item.get("title"),
-                                    "url": item.get("url"),
-                                    "snippet": str(item.get("snippet", ""))[:800],
-                                }
-                                for item in web_results
-                            ],
                         }
                     )
                 if not web_results:

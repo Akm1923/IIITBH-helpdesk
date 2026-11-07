@@ -1,4 +1,5 @@
 import json
+import math
 import re
 from collections.abc import Callable
 
@@ -20,7 +21,17 @@ def parse_judge_response(raw: str) -> tuple[float, str]:
     if match is None:
         raise ValueError("Judge response did not contain a JSON object.")
     data = json.loads(match.group(0))
-    score = float(data["score"])
+    if not isinstance(data, dict) or "score" not in data:
+        raise ValueError("Judge response must be an object containing a score.")
+    value = data["score"]
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise ValueError("Judge score must be numeric.")
+    try:
+        score = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("Judge score must be finite.") from exc
+    if not math.isfinite(score):
+        raise ValueError("Judge score must be finite.")
     if score > 1:
         score = score / 100 if score <= 100 else 1.0
     score = min(1.0, max(0.0, score))
@@ -85,10 +96,10 @@ class LlmJudge:
         try:
             raw = self.complete("judge-" + name, prompt)
             value, reason = parse_judge_response(raw)
-        except (AnswerGenerationError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        except (AnswerGenerationError, ValueError, TypeError, KeyError) as exc:
             return Evaluation(
                 name=name,
-                value=0.0,
+                value=None,
                 comment="Judge failed: " + type(exc).__name__,
             )
         return Evaluation(name=name, value=value, comment=reason or None)
@@ -139,6 +150,7 @@ def mean_score(*, item_results, **kwargs) -> list[Evaluation]:
         "faithfulness": [],
         "relevance": [],
     }
+    failures = dict.fromkeys(buckets, 0)
     for result in item_results:
         evaluations = result["evaluations"] if isinstance(result, dict) else result.evaluations
         for evaluation in evaluations:
@@ -146,11 +158,18 @@ def mean_score(*, item_results, **kwargs) -> list[Evaluation]:
                 name, value = evaluation.get("name"), evaluation.get("value")
             else:
                 name, value = evaluation.name, evaluation.value
-            if name in buckets and isinstance(value, (int, float)):
-                buckets[name].append(float(value))
+            if name in buckets:
+                if (
+                    isinstance(value, (int, float))
+                    and not isinstance(value, bool)
+                    and math.isfinite(value)
+                ):
+                    buckets[name].append(float(value))
+                else:
+                    failures[name] += 1
     summaries = []
     for name, values in buckets.items():
-        average = sum(values) / len(values) if values else 0.0
+        average = sum(values) / len(values) if values else None
         summaries.append(
             Evaluation(
                 name="mean_" + name,
@@ -158,4 +177,5 @@ def mean_score(*, item_results, **kwargs) -> list[Evaluation]:
                 comment=f"Average {name} across {len(values)} items.",
             )
         )
+        summaries.append(Evaluation(name="failed_" + name, value=failures[name]))
     return summaries

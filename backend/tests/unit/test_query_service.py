@@ -97,3 +97,64 @@ def test_query_marks_validated_citations_used_in_answer() -> None:
 
     assert result.status == "answered"
     assert result.sources[0].used_in_answer is True
+
+
+def test_query_observations_exclude_sensitive_content(monkeypatch):
+    from contextlib import contextmanager
+
+    from app.infrastructure import langfuse_client
+
+    recorded = []
+    exits = []
+
+    class Observation:
+        def update(self, **kwargs):
+            recorded.append(kwargs)
+
+    class Client:
+        @contextmanager
+        def start_as_current_observation(self, **kwargs):
+            recorded.append(kwargs)
+            try:
+                yield Observation()
+            except Exception as exc:
+                exits.append(str(exc))
+                raise
+
+    monkeypatch.setattr(langfuse_client, "tracing_enabled", lambda: True)
+    monkeypatch.setattr(langfuse_client, "get_langfuse", lambda: Client())
+
+    class Web:
+        def search(self, query):
+            return [
+                {
+                    "title": "PRIVATE_TITLE",
+                    "url": "https://example.test/PRIVATE_URL",
+                    "snippet": "PRIVATE_SNIPPET",
+                }
+            ]
+
+    chunk = _retrieved().model_copy(
+        update={"text": "PRIVATE_EXCERPT", "source_file": "PRIVATE_FILENAME"}
+    )
+    service = QueryService(
+        FakeEmbeddingClient(),
+        FakeVectorStore([chunk]),
+        FakeAnswerGenerator(["S1"]),
+        expected_dimension=3,
+        web_search=Web(),
+    )
+    result = service.query("Who is the current director? PRIVATE_QUESTION")
+    with langfuse_client.observation(
+        as_type="generation", name="test", input="PRIVATE_PROMPT"
+    ) as obs:
+        obs.update(output="PRIVATE_COMPLETION", usage_details={"input": 2})
+    with pytest.raises(ValueError, match="PRIVATE_ERROR"):
+        with langfuse_client.observation(as_type="span", name="error"):
+            raise ValueError("PRIVATE_ERROR")
+    serialized = str(recorded)
+    assert "PRIVATE_" not in serialized
+    assert result.answer not in serialized
+    assert "usage_details" in serialized
+    assert "dimension" in serialized
+    assert exits == []

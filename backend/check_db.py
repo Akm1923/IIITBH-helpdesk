@@ -1,6 +1,10 @@
 import sqlite3
 
-conn = sqlite3.connect("ingestion.sqlite3")
+from app.core.config import get_settings
+
+settings = get_settings()
+database_path = (settings.data_dir / "ingestion.sqlite3").resolve()
+conn = sqlite3.connect(database_path.as_uri() + "?mode=ro", uri=True)
 cursor = conn.cursor()
 
 print("\n--- DATABASE TABLES ---")

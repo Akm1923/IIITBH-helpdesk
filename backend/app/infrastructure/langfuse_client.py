@@ -11,6 +11,18 @@ load_dotenv(_REPO_ROOT / ".env")
 load_dotenv(_BACKEND_ROOT / ".env")
 
 
+class _PrivateObservation:
+    """Prevent generation prompts and completions from reaching the SDK."""
+
+    def __init__(self, current):
+        self.current = current
+
+    def update(self, **kwargs: Any) -> None:
+        if "output" in kwargs:
+            kwargs["output"] = "[REDACTED]"
+        self.current.update(**kwargs)
+
+
 class _NoopObservation:
     def update(self, **kwargs: Any) -> None:
         return None
@@ -62,16 +74,22 @@ def observation(**kwargs: Any):
         return
     try:
         client = get_langfuse()
+        is_generation = kwargs.get("as_type") == "generation"
+        if is_generation:
+            kwargs["input"] = "[REDACTED]"
         context = client.start_as_current_observation(**kwargs)
     except Exception:
         yield _NoopObservation()
         return
-    with context as current:
+    current = context.__enter__()
+    try:
+        yield _PrivateObservation(current) if is_generation else current
+    except Exception as exc:
         try:
-            yield current
-        except Exception as exc:
-            try:
-                current.update(level="ERROR", status_message=type(exc).__name__ + ": " + str(exc)[:400])
-            except Exception:
-                pass
-            raise
+            current.update(level="ERROR", status_message=type(exc).__name__)
+        except Exception:
+            pass
+        raise
+    finally:
+        # Do not let SDK exception recording export sensitive exception messages.
+        context.__exit__(None, None, None)

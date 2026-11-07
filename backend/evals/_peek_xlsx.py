@@ -1,7 +1,10 @@
+from pathlib import Path
+
 import openpyxl
 
 wb = openpyxl.load_workbook(
-    r"evals\datasets\IIITBH_QA_Pairs_200.xlsx", read_only=True, data_only=True
+    Path(__file__).resolve().parent / "datasets" / "IIITBH_QA_Pairs_200.xlsx",
+    read_only=True, data_only=True
 )
 ws = wb.active
 print("sheet", ws.title)

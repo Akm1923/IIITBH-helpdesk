@@ -59,3 +59,44 @@ def test_openai_compatible_answer_generator_extracts_citations():
     assert "untrusted" in http.payload["json"]["messages"][0]["content"].lower()
     assert "[S1]" in http.payload["json"]["messages"][1]["content"]
     assert OpenAICompatibleAnswerGenerator.CITATION_PATTERN.findall("[W1] [S1]") == ["W1", "S1"]
+
+
+def test_invalid_usage_does_not_discard_completion(monkeypatch):
+    from contextlib import contextmanager
+
+    from app.infrastructure.answer_generation import openai_compatible_generator as module
+
+    updates = []
+
+    class Observation:
+        def update(self, **kwargs):
+            updates.append(kwargs)
+
+    @contextmanager
+    def observation(**kwargs):
+        yield Observation()
+
+    monkeypatch.setattr(module, "observation", observation)
+
+    class Response(FakeResponse):
+        def json(self):
+            return {
+                **super().json(),
+                "usage": {
+                    "prompt_tokens": "invalid",
+                    "completion_tokens": "12",
+                    "total_tokens": {},
+                },
+            }
+
+    class Http:
+        def post(self, *args, **kwargs):
+            return Response()
+
+    generator = OpenAICompatibleAnswerGenerator(
+        "https://example.test", "key", "model", http_client=Http()
+    )
+    assert generator._complete([]) == "The semester begins in July. [S1]"
+    assert updates == [
+        {"output": "The semester begins in July. [S1]", "usage_details": {"output": 12}}
+    ]

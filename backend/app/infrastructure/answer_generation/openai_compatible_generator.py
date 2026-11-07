@@ -77,12 +77,16 @@ class OpenAICompatibleAnswerGenerator:
             update: dict[str, Any] = {"output": text}
             if isinstance(usage, dict):
                 details: dict[str, int] = {}
-                if usage.get("prompt_tokens") is not None:
-                    details["input"] = int(usage["prompt_tokens"])
-                if usage.get("completion_tokens") is not None:
-                    details["output"] = int(usage["completion_tokens"])
-                if usage.get("total_tokens") is not None:
-                    details["total"] = int(usage["total_tokens"])
+                for provider_key, key in (
+                    ("prompt_tokens", "input"),
+                    ("completion_tokens", "output"),
+                    ("total_tokens", "total"),
+                ):
+                    if usage.get(provider_key) is not None:
+                        try:
+                            details[key] = int(usage[provider_key])
+                        except (TypeError, ValueError, OverflowError):
+                            continue
                 if details:
                     update["usage_details"] = details
             generation.update(**update)
