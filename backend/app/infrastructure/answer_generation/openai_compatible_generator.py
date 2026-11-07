@@ -5,6 +5,7 @@ import httpx
 
 from app.application.query.guardrails import sanitize_answer
 from app.domain.retrieval.models import EvidenceSource, GeneratedAnswer
+from app.infrastructure.langfuse_client import observation
 
 
 class AnswerGenerationError(RuntimeError):
@@ -32,29 +33,60 @@ class OpenAICompatibleAnswerGenerator:
         self.http = http_client or httpx.Client(timeout=timeout_seconds)
 
     def _complete(
-        self, messages: list[dict[str, str]], max_tokens: int = 2048, temperature: float = 0.2
+        self,
+        messages: list[dict[str, str]],
+        max_tokens: int = 2048,
+        temperature: float = 0.2,
+        name: str = "llm-completion",
     ) -> str:
-        try:
-            response = self.http.post(
-                self.url,
-                headers={
-                    "Authorization": "Bearer " + self.api_key,
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": self.model_id,
-                    "temperature": temperature,
-                    "max_completion_tokens": max_tokens,
-                    "messages": messages,
-                },
-            )
-            response.raise_for_status()
-            content = response.json()["choices"][0]["message"]["content"]
-        except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
-            raise AnswerGenerationError("Answer provider failed: " + type(exc).__name__) from exc
-        if not isinstance(content, str):
-            raise AnswerGenerationError("Answer provider returned non-text content.")
-        return content.strip()
+        with observation(
+            as_type="generation",
+            name=name,
+            model=self.model_id,
+            input=messages,
+            model_parameters={
+                "temperature": temperature,
+                "max_completion_tokens": max_tokens,
+            },
+        ) as generation:
+            try:
+                response = self.http.post(
+                    self.url,
+                    headers={
+                        "Authorization": "Bearer " + self.api_key,
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": self.model_id,
+                        "temperature": temperature,
+                        "max_completion_tokens": max_tokens,
+                        "messages": messages,
+                    },
+                )
+                response.raise_for_status()
+                payload = response.json()
+                content = payload["choices"][0]["message"]["content"]
+            except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
+                raise AnswerGenerationError(
+                    "Answer provider failed: " + type(exc).__name__
+                ) from exc
+            if not isinstance(content, str):
+                raise AnswerGenerationError("Answer provider returned non-text content.")
+            text = content.strip()
+            usage = payload.get("usage") if isinstance(payload, dict) else None
+            update: dict[str, Any] = {"output": text}
+            if isinstance(usage, dict):
+                details: dict[str, int] = {}
+                if usage.get("prompt_tokens") is not None:
+                    details["input"] = int(usage["prompt_tokens"])
+                if usage.get("completion_tokens") is not None:
+                    details["output"] = int(usage["completion_tokens"])
+                if usage.get("total_tokens") is not None:
+                    details["total"] = int(usage["total_tokens"])
+                if details:
+                    update["usage_details"] = details
+            generation.update(**update)
+            return text
 
     def reformulate_query(self, question: str) -> str:
         """Rewrite conversational queries for semantic retrieval; fall back to original."""
@@ -73,6 +105,7 @@ class OpenAICompatibleAnswerGenerator:
                 ],
                 max_tokens=120,
                 temperature=0.0,
+                name="query-reformulation",
             )
             rewritten = rewritten.strip(" `\"'\n")[:400]
             return rewritten if rewritten else question
@@ -119,6 +152,7 @@ class OpenAICompatibleAnswerGenerator:
                 ],
                 max_tokens=2300,
                 temperature=0.2,
+                name="answer-generation",
             )
         )
         citations = list(dict.fromkeys(self.CITATION_PATTERN.findall(answer)))
@@ -143,6 +177,7 @@ class OpenAICompatibleAnswerGenerator:
                 ],
                 max_tokens=2300,
                 temperature=0.0,
+                name="citation-repair",
             )
             repaired_citations = list(dict.fromkeys(self.CITATION_PATTERN.findall(repaired)))
             if repaired_citations:

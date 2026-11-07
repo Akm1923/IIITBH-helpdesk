@@ -2,8 +2,11 @@ import re
 from datetime import datetime
 from uuid import uuid4
 
+from langfuse import propagate_attributes
+
 from app.application.query.guardrails import validate_question
 from app.domain.retrieval.models import EvidenceSource, GeneratedAnswer, QueryResult
+from app.infrastructure.langfuse_client import observation, tracing_enabled
 from app.ports.answer_generator import AnswerGenerator
 from app.ports.embedding_client import EmbeddingClient
 from app.ports.vector_store import VectorStore
@@ -25,6 +28,21 @@ CURRENT_PATTERNS = (
 
 def needs_live_search(question: str) -> bool:
     return any(re.search(pattern, question, re.IGNORECASE) for pattern in CURRENT_PATTERNS)
+
+
+def _trace_sources(sources: list[EvidenceSource]) -> list[dict]:
+    return [
+        {
+            "evidence_id": source.evidence_id,
+            "source_type": source.source_type,
+            "source_file": source.source_file,
+            "page_number": source.page_number,
+            "score": source.score,
+            "used_in_answer": source.used_in_answer,
+            "excerpt": source.excerpt[:800],
+        }
+        for source in sources
+    ]
 
 
 class QueryService:
@@ -49,6 +67,53 @@ class QueryService:
         self.web_search_enabled = web_search_enabled
 
     def query(
+        self,
+        question: str,
+        top_k: int = 5,
+        score_threshold: float | None = None,
+    ) -> QueryResult:
+        attributes = (
+            propagate_attributes(trace_name="iiitbh-rag-query", tags=["rag", "iiitbh"])
+            if tracing_enabled()
+            else None
+        )
+        if attributes is None:
+            return self._traced_query(question, top_k, score_threshold)
+        with attributes:
+            return self._traced_query(question, top_k, score_threshold)
+
+    def _traced_query(
+        self,
+        question: str,
+        top_k: int,
+        score_threshold: float | None,
+    ) -> QueryResult:
+        with observation(
+            as_type="span",
+            name="rag-query",
+            input={
+                "question": question,
+                "top_k": top_k,
+                "score_threshold": score_threshold,
+            },
+        ) as current:
+            result = self._query(
+                question=question,
+                top_k=top_k,
+                score_threshold=score_threshold,
+            )
+            current.update(
+                output={
+                    "query_id": result.query_id,
+                    "status": result.status,
+                    "answer": result.answer,
+                    "insufficient_evidence": result.insufficient_evidence,
+                    "sources": _trace_sources(result.sources),
+                }
+            )
+            return result
+
+    def _query(
         self, question: str, top_k: int = 5, score_threshold: float | None = None
     ) -> QueryResult:
         normalized_question = validate_question(question)
@@ -63,14 +128,48 @@ class QueryService:
                 self.answer_generator.reformulate_query(normalized_question) or normalized_question
             )
 
-        query_vector = self.embedding_client.embed_query(retrieval_query)
+        embedding_kwargs: dict = {
+            "as_type": "embedding",
+            "name": "embed-query",
+            "input": {"text": retrieval_query},
+        }
+        embedding_model = getattr(self.embedding_client, "model", None)
+        if isinstance(embedding_model, str) and embedding_model.strip():
+            embedding_kwargs["model"] = embedding_model
+        with observation(**embedding_kwargs) as embed_obs:
+            query_vector = self.embedding_client.embed_query(retrieval_query)
+            embed_obs.update(output={"dimension": len(query_vector)})
         if len(query_vector) != self.expected_dimension:
             raise ValueError(
                 f"Query embedding dimension {len(query_vector)} does not match configured embedding dimension {self.expected_dimension}."
             )
-        retrieved = self.vector_store.search(
-            query_vector=query_vector, top_k=top_k, score_threshold=score_threshold
-        )
+        with observation(
+            as_type="retriever",
+            name="institutional-retrieval",
+            input={
+                "query": retrieval_query,
+                "top_k": top_k,
+                "score_threshold": score_threshold,
+            },
+        ) as retrieval_obs:
+            retrieved = self.vector_store.search(
+                query_vector=query_vector, top_k=top_k, score_threshold=score_threshold
+            )
+            retrieval_obs.update(
+                output={
+                    "count": len(retrieved),
+                    "hits": [
+                        {
+                            "source_file": item.source_file,
+                            "document_id": item.document_id,
+                            "page_number": item.page_number,
+                            "score": item.score,
+                            "excerpt": item.text[:800],
+                        }
+                        for item in retrieved
+                    ],
+                }
+            )
         query_id = str(uuid4())
 
         sources = [
@@ -98,7 +197,25 @@ class QueryService:
         if web_search_attempted:
             live_query = retrieval_query + " " + datetime.now().astimezone().date().isoformat()
             try:
-                web_results = self.web_search.search(live_query)
+                with observation(
+                    as_type="tool",
+                    name="web-search",
+                    input={"query": live_query},
+                ) as web_obs:
+                    web_results = self.web_search.search(live_query)
+                    web_obs.update(
+                        output={
+                            "count": len(web_results),
+                            "results": [
+                                {
+                                    "title": item.get("title"),
+                                    "url": item.get("url"),
+                                    "snippet": str(item.get("snippet", ""))[:800],
+                                }
+                                for item in web_results
+                            ],
+                        }
+                    )
                 if not web_results:
                     web_error = True
                 for index, item in enumerate(web_results, start=1):

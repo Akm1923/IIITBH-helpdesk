@@ -4,6 +4,7 @@ from app.api.dependencies import get_query_service
 from app.application.query.query_service import InvalidCitationError, QueryService
 from app.infrastructure.answer_generation.openai_compatible_generator import AnswerGenerationError
 from app.infrastructure.embeddings.huggingface_bge_m3 import EmbeddingServiceError
+from app.infrastructure.langfuse_client import flush_langfuse
 from app.infrastructure.vectorstores.qdrant_store import VectorStoreError
 from app.schemas.query import QueryRequest, QueryResponse
 
@@ -40,4 +41,6 @@ def query_documents(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=str(exc),
         ) from exc
+    finally:
+        flush_langfuse()
     return QueryResponse.model_validate(result.model_dump())
